@@ -1024,7 +1024,9 @@ struct monad_executor
         if (tracer_config != PRESTATE_TRACER &&
             tracer_config != STATEDIFF_TRACER) {
             result->status_code = EVMC_REJECTED;
-            result->message = strdup("only the prestate tracer is supported");
+            result->message =
+                strdup("only the prestate tracer and the statediff "
+                       "tracer are supported");
             MONAD_ASSERT(result->message);
             complete(result, user);
             return;
