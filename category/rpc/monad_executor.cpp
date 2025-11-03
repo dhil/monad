@@ -639,6 +639,7 @@ struct monad_executor
 {
     Pool low_gas_pool_;
     Pool high_gas_pool_;
+    Pool trace_block_pool_;
 
     // Sequence number for each call. This is used as a priority of the request,
     // requests started earlier have higher priority.
@@ -654,9 +655,11 @@ struct monad_executor
     monad_executor(
         monad_executor_pool_config const &low_pool_config,
         monad_executor_pool_config const &high_pool_config,
+        monad_executor_pool_config const &block_pool_config,
         uint64_t const node_lru_max_mem, std::string const &triedb_path)
         : low_gas_pool_{Pool::Type::low, low_pool_config}
         , high_gas_pool_{Pool::Type::high, high_pool_config}
+        , trace_block_pool_{Pool::Type::high, block_pool_config}
         , db_{[&] {
             std::vector<std::filesystem::path> paths;
             if (std::filesystem::is_directory(triedb_path)) {
@@ -1035,7 +1038,7 @@ struct monad_executor
             return;
         }
 
-        if (!high_gas_pool_.try_enqueue()) {
+        if (!trace_block_pool_.try_enqueue()) {
             result->status_code = EVMC_REJECTED;
             result->message = strdup(EXCEED_QUEUE_SIZE_ERR_MSG);
             MONAD_ASSERT(result->message);
@@ -1045,12 +1048,7 @@ struct monad_executor
 
         auto const priority =
             call_seq_no_.fetch_add(1, std::memory_order_relaxed);
-        // TODO(dhil): I don't think retry semantics makes any sense here, as
-        // there is no gas limit to specify, and the transaction replays should
-        // be guaranteed to complete as there is no notion of state override
-        // here. However, the question remains: should we use the low or high
-        // gas pool, or some separate pool here? The executor
-        high_gas_pool_.pool.submit(
+        trace_block_pool_.pool.submit(
             priority,
             [this,
              block_id = block_id,
@@ -1059,15 +1057,13 @@ struct monad_executor
              chain_config = chain_config,
              complete = complete,
              &db = db_,
-             fiber_pool = &high_gas_pool_,
+             fiber_pool = &trace_block_pool_,
              parent_id = parent_id,
              result = result,
              tracer_config = tracer_config,
              trace_transaction = trace_transaction,
              transaction_index = transaction_index,
              user = user]() {
-                // TODO(dhil): These trace block calls can consume a lot more
-                // resources than an eth_call request.
                 fiber_pool->queued_count.fetch_sub(
                     1, std::memory_order_relaxed);
                 fiber_pool->executing_count.fetch_add(
@@ -1237,13 +1233,18 @@ struct monad_executor
 monad_executor *monad_executor_create(
     monad_executor_pool_config const low_pool_conf,
     monad_executor_pool_config const high_pool_conf,
+    monad_executor_pool_config const block_pool_conf,
     uint64_t const node_lru_max_mem, char const *const dbpath)
 {
     MONAD_ASSERT(dbpath);
     std::string const triedb_path{dbpath};
 
     monad_executor *const e = new monad_executor(
-        low_pool_conf, high_pool_conf, node_lru_max_mem, triedb_path);
+        low_pool_conf,
+        high_pool_conf,
+        block_pool_conf,
+        node_lru_max_mem,
+        triedb_path);
 
     return e;
 }
@@ -1315,6 +1316,7 @@ struct monad_executor_state monad_executor_get_state(monad_executor *const e)
     return monad_executor_state{
         .low_gas_pool_state = e->low_gas_pool_.get_state(),
         .high_gas_pool_state = e->high_gas_pool_.get_state(),
+        .trace_block_pool_state = e->trace_block_pool_.get_state(),
     };
 }
 

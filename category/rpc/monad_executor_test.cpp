@@ -60,7 +60,7 @@ namespace
     {
         monad_executor_pool_config conf = {1, 2, max_timeout, 1000};
         return monad_executor_create(
-            conf, conf, node_lru_max_mem, dbname.c_str());
+            conf, conf, conf, node_lru_max_mem, dbname.c_str());
     }
 
     std::vector<uint8_t> to_vec(byte_string const &bs)
