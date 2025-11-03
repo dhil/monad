@@ -314,7 +314,7 @@ namespace
         MONAD_ASSERT(transactions.size() == senders.size());
         MONAD_ASSERT(transactions.size() == authorities.size());
 
-        size_t const span_size = [&]() {
+        size_t const transactions_size = [&]() {
             if (trace_transaction) {
                 MONAD_ASSERT(
                     transaction_index <
@@ -325,52 +325,53 @@ namespace
         }();
 
         std::span<Transaction const> transactions_view{
-            transactions.data(), span_size};
-        std::span<Address const> senders_view{senders.data(), span_size};
+            transactions.data(), transactions_size};
+        std::span<Address const> senders_view{
+            senders.data(), transactions_size};
         std::span<std::vector<std::optional<Address>> const> authorities_view{
-            authorities.data(), span_size};
+            authorities.data(), transactions_size};
 
         // Execute block header
         execute_block_header<traits>(chain, block_state, header);
         BlockMetrics metrics{};
 
         // Prepare state tracers and auxiliary noop call tracers.
-        using json = nlohmann::json;
         std::vector<std::unique_ptr<trace::StateTracer>> state_tracers{};
-        state_tracers.reserve(span_size);
+        state_tracers.reserve(transactions_size);
 
         // Helper to create a trace log entry of the form:
         //   {"result": { execution trace goes here }, "txHash": "0x..."}
         auto const trace_entry =
-            [&transactions](uint64_t const transaction_index) -> json {
+            [&transactions](
+                uint64_t const transaction_index) -> nlohmann::json {
             bytes32_t const tx_hash = to_bytes(keccak256(
                 rlp::encode_transaction(transactions[transaction_index])));
-            json entry{
-                {"result", json{}},
+            nlohmann::json entry{
+                {"result", nlohmann::json{}},
                 {"txHash", std::format("0x{}", evmc::hex(tx_hash))}};
             return entry;
         };
 
         std::vector<std::unique_ptr<CallTracerBase>> noop_call_tracers{};
-        noop_call_tracers.reserve(span_size);
+        noop_call_tracers.reserve(transactions_size);
 
-        for (size_t i = 0; i < span_size; ++i) {
+        for (size_t i = 0; i < transactions_size; ++i) {
             noop_call_tracers.emplace_back(std::make_unique<NoopCallTracer>());
         }
         std::span<std::unique_ptr<CallTracerBase>> noop_call_tracers_view{
-            noop_call_tracers.data(), span_size};
+            noop_call_tracers.data(), transactions_size};
 
         // Trace single transaction
         if (trace_transaction) {
             // We allocate just one trace entry here as we only need to return
             // the trace result of `transactions[transaction_index]`.
 
-            for (size_t i = 0; i < span_size - 1; ++i) {
+            for (size_t i = 0; i < transactions_size - 1; ++i) {
                 state_tracers.emplace_back(
                     std::make_unique<trace::StateTracer>(std::monostate{}));
             }
 
-            json trace = trace_entry(transaction_index);
+            nlohmann::json trace = trace_entry(transaction_index);
             state_tracers.emplace_back(
                 tracer_config == PRESTATE_TRACER
                     ? std::make_unique<trace::StateTracer>(
@@ -379,7 +380,7 @@ namespace
                           trace::StateDiffTracer{trace["result"]}));
 
             std::span<std::unique_ptr<trace::StateTracer>> state_tracers_view{
-                state_tracers.data(), span_size};
+                state_tracers.data(), transactions_size};
 
             BOOST_OUTCOME_TRY(execute_block_transactions<traits>(
                 chain,
@@ -397,9 +398,9 @@ namespace
         }
         else {
             // Trace an entire block
-            std::vector<json> traces{};
-            traces.reserve(span_size);
-            for (size_t i = 0; i < span_size; ++i) {
+            std::vector<nlohmann::json> traces{};
+            traces.reserve(transactions_size);
+            for (size_t i = 0; i < transactions_size; ++i) {
                 traces.emplace_back(trace_entry(i));
                 if (tracer_config == PRESTATE_TRACER) {
                     state_tracers.emplace_back(
@@ -414,7 +415,7 @@ namespace
             }
 
             std::span<std::unique_ptr<trace::StateTracer>> state_tracers_view{
-                state_tracers.data(), span_size};
+                state_tracers.data(), transactions_size};
 
             BOOST_OUTCOME_TRY(execute_block_transactions<traits>(
                 chain,
@@ -430,7 +431,7 @@ namespace
                 state_tracers_view));
 
             // Compose state traces
-            return Result<json>{std::move(traces)};
+            return Result<nlohmann::json>{std::move(traces)};
         }
     }
 }
