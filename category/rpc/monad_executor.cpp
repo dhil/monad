@@ -139,6 +139,15 @@ namespace
         "failure to submit eth_call to thread pool: queue size exceeded";
     char const *const TIMEOUT_ERR_MSG =
         "failure to execute eth_call: queuing time exceeded timeout threshold";
+    char const *const PRESTATE_TRACER_SUPPORT_ERR_MSG =
+        "only the prestate tracer and the statediff "
+        "tracer are supported";
+    char const *const CANNOT_TRACE_GENESIS_ERR_MSG =
+        "cannot trace genesis block";
+    char const *const LOAD_TRANSACTIONS_ERR_MSG = "failed to load transactions";
+    char const *const TRANSACTION_OUT_OF_BOUNDS_ERR_MSG =
+        "transaction out of bounds";
+    char const *const RECOVER_SENDER_ERR_MSG = "failed to recover sender";
     using StateOverrideObj = monad_state_override::monad_state_override_object;
 
     template <Traits traits>
@@ -1024,9 +1033,7 @@ struct monad_executor
         if (tracer_config != PRESTATE_TRACER &&
             tracer_config != STATEDIFF_TRACER) {
             result->status_code = EVMC_REJECTED;
-            result->message =
-                strdup("only the prestate tracer and the statediff "
-                       "tracer are supported");
+            result->message = strdup(PRESTATE_TRACER_SUPPORT_ERR_MSG);
             MONAD_ASSERT(result->message);
             complete(result, user);
             return;
@@ -1034,7 +1041,7 @@ struct monad_executor
 
         if (block_number == 0) {
             result->status_code = EVMC_REJECTED;
-            result->message = strdup("cannot trace genesis block");
+            result->message = strdup(CANNOT_TRACE_GENESIS_ERR_MSG);
             MONAD_ASSERT(result->message);
             complete(result, user);
             return;
@@ -1102,7 +1109,7 @@ struct monad_executor
                             get_transactions(db, block_number, block_id);
                     if (maybe_transactions.has_error()) {
                         result->status_code = EVMC_REJECTED;
-                        result->message = strdup("Failed to load transactions");
+                        result->message = strdup(LOAD_TRANSACTIONS_ERR_MSG);
                         MONAD_ASSERT(result->message);
                         complete(result, user);
                         return;
@@ -1112,7 +1119,8 @@ struct monad_executor
                     if (trace_transaction &&
                         transactions.size() <= transaction_index) {
                         result->status_code = EVMC_REJECTED;
-                        result->message = strdup("Transaction out of bounds");
+                        result->message =
+                            strdup(TRANSACTION_OUT_OF_BOUNDS_ERR_MSG);
                         MONAD_ASSERT(result->message);
                         complete(result, user);
                         return;
@@ -1130,7 +1138,7 @@ struct monad_executor
                             if (!recovered_senders[i].has_value()) {
                                 result->status_code = EVMC_REJECTED;
                                 result->message =
-                                    strdup("Failed to recover sender");
+                                    strdup(RECOVER_SENDER_ERR_MSG);
                                 MONAD_ASSERT(result->message);
                                 complete(result, user);
                                 return;
