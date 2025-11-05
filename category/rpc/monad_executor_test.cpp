@@ -1822,6 +1822,7 @@ TEST_F(EthCallFixture, trace_block_with_prestate)
     auto const rlp_header = to_vec(rlp::encode_block_header(header));
     auto const rlp_block_id = to_vec(rlp_finalized_id);
     auto const rlp_parent_id = to_vec(rlp::encode_bytes32(bytes32_t{255}));
+    auto const rlp_grandparent_id = to_vec(rlp::encode_bytes32(bytes32_t{254}));
 
     commit_sequential(
         tdb,
@@ -1851,6 +1852,8 @@ TEST_F(EthCallFixture, trace_block_with_prestate)
             rlp_block_id.size(),
             rlp_parent_id.data(),
             rlp_parent_id.size(),
+            rlp_grandparent_id.data(),
+            rlp_grandparent_id.size(),
             false,
             0,
             complete_callback,
@@ -1917,6 +1920,8 @@ TEST_F(EthCallFixture, trace_block_with_prestate)
             rlp_block_id.size(),
             rlp_parent_id.data(),
             rlp_parent_id.size(),
+            rlp_grandparent_id.data(),
+            rlp_grandparent_id.size(),
             false,
             0,
             complete_callback,
@@ -2061,6 +2066,7 @@ TEST_F(EthCallFixture, trace_transaction_with_prestate)
     auto const rlp_header = to_vec(rlp::encode_block_header(header));
     auto const rlp_block_id = to_vec(rlp_finalized_id);
     auto const rlp_parent_id = to_vec(rlp::encode_bytes32(bytes32_t{255}));
+    auto const rlp_grandparent_id = to_vec(rlp::encode_bytes32(bytes32_t{254}));
 
     commit_sequential(
         tdb,
@@ -2092,6 +2098,8 @@ TEST_F(EthCallFixture, trace_transaction_with_prestate)
             rlp_block_id.size(),
             rlp_parent_id.data(),
             rlp_parent_id.size(),
+            rlp_grandparent_id.data(),
+            rlp_grandparent_id.size(),
             true,
             0,
             complete_callback,
@@ -2139,6 +2147,8 @@ TEST_F(EthCallFixture, trace_transaction_with_prestate)
             rlp_block_id.size(),
             rlp_parent_id.data(),
             rlp_parent_id.size(),
+            rlp_grandparent_id.data(),
+            rlp_grandparent_id.size(),
             true,
             1,
             complete_callback,
@@ -2189,6 +2199,8 @@ TEST_F(EthCallFixture, trace_transaction_with_prestate)
             rlp_block_id.size(),
             rlp_parent_id.data(),
             rlp_parent_id.size(),
+            rlp_grandparent_id.data(),
+            rlp_grandparent_id.size(),
             true,
             0,
             complete_callback,
@@ -2245,6 +2257,8 @@ TEST_F(EthCallFixture, trace_transaction_with_prestate)
             rlp_block_id.size(),
             rlp_parent_id.data(),
             rlp_parent_id.size(),
+            rlp_grandparent_id.data(),
+            rlp_grandparent_id.size(),
             true,
             1,
             complete_callback,

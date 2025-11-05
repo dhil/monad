@@ -39,6 +39,7 @@
 #include <category/execution/ethereum/tx_context.hpp>
 #include <category/execution/ethereum/types/incarnation.hpp>
 #include <category/execution/ethereum/validate_transaction.hpp>
+#include <category/execution/monad/chain/monad_chain.hpp>
 #include <category/execution/monad/chain/monad_devnet.hpp>
 #include <category/execution/monad/chain/monad_mainnet.hpp>
 #include <category/execution/monad/chain/monad_testnet.hpp>
@@ -144,10 +145,11 @@ namespace
         "tracer are supported";
     char const *const CANNOT_TRACE_GENESIS_ERR_MSG =
         "cannot trace genesis block";
-    char const *const LOAD_TRANSACTIONS_ERR_MSG = "failed to load transactions";
+    char const *const RECOVER_SENDER_ERR_MSG = "failed to recover sender";
+    char const *const TRANSACTIONS_CONTEXT_ERR_MSG =
+        "failed to recover the transactions context";
     char const *const TRANSACTION_OUT_OF_BOUNDS_ERR_MSG =
         "transaction out of bounds";
-    char const *const RECOVER_SENDER_ERR_MSG = "failed to recover sender";
     using StateOverrideObj = monad_state_override::monad_state_override_object;
 
     template <Traits traits>
@@ -300,19 +302,95 @@ namespace
         return execution_result;
     }
 
+    ankerl::unordered_dense::segmented_set<Address>
+    combine_senders_and_authorities(
+        std::vector<Address> const &senders,
+        std::vector<std::vector<std::optional<Address>>> const &authorities)
+    {
+        ankerl::unordered_dense::segmented_set<Address> senders_and_authorities;
+
+        for (Address const &sender : senders) {
+            senders_and_authorities.insert(sender);
+        }
+
+        for (auto const &authorities_ : authorities) {
+            for (std::optional<Address> const &authority : authorities_) {
+                if (authority.has_value()) {
+                    senders_and_authorities.insert(authority.value());
+                }
+            }
+        }
+
+        return senders_and_authorities;
+    }
+
+    std::pair<
+        std::vector<Address>, std::vector<std::vector<std::optional<Address>>>>
+    recover_senders_and_authorities(
+        std::vector<Transaction> const &transactions,
+        monad::fiber::PriorityPool &pool)
+    {
+        std::vector<Address> senders;
+        {
+            std::vector<std::optional<Address>> recovered_senders =
+                monad::recover_senders(transactions, pool);
+            for (std::optional<Address> const &sender : recovered_senders) {
+                MONAD_ASSERT_THROW(sender.has_value(), RECOVER_SENDER_ERR_MSG);
+                senders.emplace_back(sender.value());
+            }
+        }
+
+        std::vector<std::vector<std::optional<Address>>> authorities =
+            monad::recover_authorities(transactions, pool);
+
+        return {std::move(senders), std::move(authorities)};
+    }
+
     template <Traits traits>
     Result<nlohmann::json> eth_trace_block_or_transaction_impl(
-        Chain const &chain, BlockHeader const &header,
-        std::vector<Transaction> const &transactions,
-        std::vector<Address> const &senders,
-        std::vector<std::vector<std::optional<Address>>> const &authorities,
+        Chain const &chain, MonadChainContext const &chain_context,
+        BlockHeader const &header, std::vector<Transaction> const &transactions,
         bool const trace_transaction, uint64_t const transaction_index,
         BlockState &block_state, BlockHashBufferFinalized const buffer,
         monad::fiber::PriorityPool &pool,
         enum monad_tracer_config tracer_config)
     {
-        MONAD_ASSERT(transactions.size() == senders.size());
-        MONAD_ASSERT(transactions.size() == authorities.size());
+        MONAD_ASSERT(transactions.size() == chain_context.senders.size());
+        MONAD_ASSERT(transactions.size() == chain_context.authorities.size());
+
+        auto const revert_transaction = [&chain, &header, &chain_context](
+                                            Address const &sender,
+                                            Transaction const &tx,
+                                            uint64_t const i,
+                                            State &state) -> bool {
+            if constexpr (is_monad_trait_v<traits>) {
+                // If this cast doesn't succeed, then something has gone
+                // terribly wrong. It will throw an exception which we let
+                // the caller of `eth_trace_block_or_transaction_impl`
+                // handle.
+                return dynamic_cast<MonadChain const &>(chain)
+                    .revert_transaction(
+                        header.number,
+                        header.timestamp,
+                        sender,
+                        tx,
+                        header.base_fee_per_gas.value_or(0),
+                        i,
+                        state,
+                        chain_context);
+            }
+            else {
+                // Suppress unused parameter warnings
+                (void)chain;
+                (void)header;
+                (void)chain_context;
+                (void)sender;
+                (void)tx;
+                (void)i;
+                (void)state;
+                return false;
+            }
+        };
 
         size_t const transactions_size = [&]() {
             if (trace_transaction) {
@@ -327,9 +405,9 @@ namespace
         std::span<Transaction const> transactions_view{
             transactions.data(), transactions_size};
         std::span<Address const> senders_view{
-            senders.data(), transactions_size};
+            chain_context.senders.data(), transactions_size};
         std::span<std::vector<std::optional<Address>> const> authorities_view{
-            authorities.data(), transactions_size};
+            chain_context.authorities.data(), transactions_size};
 
         // Execute block header
         execute_block_header<traits>(chain, block_state, header);
@@ -393,7 +471,8 @@ namespace
                 pool,
                 metrics,
                 noop_call_tracers_view,
-                state_tracers_view));
+                state_tracers_view,
+                revert_transaction));
             return Result<nlohmann::json>{std::move(trace)};
         }
         else {
@@ -428,7 +507,8 @@ namespace
                 pool,
                 metrics,
                 noop_call_tracers_view,
-                state_tracers_view));
+                state_tracers_view,
+                revert_transaction));
 
             // Compose state traces
             return Result<nlohmann::json>{std::move(traces)};
@@ -1024,8 +1104,8 @@ struct monad_executor
     void submit_eth_trace_block_or_transaction_to_pool(
         monad_chain_config const chain_config, BlockHeader const &block_header,
         uint64_t const block_number, bytes32_t const &block_id,
-        bytes32_t const &parent_id, bool const trace_transaction,
-        uint64_t const transaction_index,
+        bytes32_t const &parent_id, bytes32_t const &grandparent_id,
+        bool const trace_transaction, uint64_t const transaction_index,
         void (*complete)(monad_executor_result *, void *user), void *const user,
         monad_tracer_config const tracer_config)
     {
@@ -1068,6 +1148,7 @@ struct monad_executor
              complete = complete,
              &db = db_,
              fiber_pool = &trace_block_pool_,
+             grandparent_id = grandparent_id,
              parent_id = parent_id,
              result = result,
              tracer_config = tracer_config,
@@ -1104,53 +1185,83 @@ struct monad_executor
                         return;
                     }
 
-                    // Load transactions, senders, and authorities
-                    Result<std::vector<monad::Transaction>> const
-                        maybe_transactions =
-                            get_transactions(db, block_number, block_id);
-                    if (maybe_transactions.has_error()) {
-                        result->status_code = EVMC_REJECTED;
-                        result->message = strdup(LOAD_TRANSACTIONS_ERR_MSG);
-                        MONAD_ASSERT(result->message);
-                        complete(result, user);
-                        return;
-                    }
-                    std::vector<Transaction> const &transactions =
-                        maybe_transactions.value();
-                    if (trace_transaction &&
-                        transactions.size() <= transaction_index) {
-                        result->status_code = EVMC_REJECTED;
-                        result->message =
-                            strdup(TRANSACTION_OUT_OF_BOUNDS_ERR_MSG);
-                        MONAD_ASSERT(result->message);
-                        complete(result, user);
-                        return;
+                    // Load transactions, senders, and authorities for
+                    // `block_number`.
+                    auto const maybe_transactions =
+                        monad::get_transactions(db, block_number, block_id);
+                    MONAD_ASSERT_THROW(
+                        maybe_transactions.has_value(),
+                        TRANSACTIONS_CONTEXT_ERR_MSG);
+
+                    auto const &transactions =
+                        maybe_transactions.assume_value();
+                    if (trace_transaction) {
+                        MONAD_ASSERT_THROW(
+                            transaction_index < transactions.size(),
+                            TRANSACTION_OUT_OF_BOUNDS_ERR_MSG);
                     }
 
-                    std::vector<Address> senders;
-                    {
-                        std::vector<std::optional<Address>> const
-                            recovered_senders = monad::recover_senders(
-                                transactions, fiber_pool->pool);
-                        MONAD_ASSERT(
-                            recovered_senders.size() == transactions.size());
-                        senders.reserve(transactions.size());
-                        for (size_t i = 0; i < recovered_senders.size(); i++) {
-                            if (!recovered_senders[i].has_value()) {
-                                result->status_code = EVMC_REJECTED;
-                                result->message =
-                                    strdup(RECOVER_SENDER_ERR_MSG);
-                                MONAD_ASSERT(result->message);
-                                complete(result, user);
-                                return;
-                            }
-                            senders.emplace_back(*recovered_senders[i]);
-                        }
-                        MONAD_ASSERT(senders.size() == transactions.size());
-                    }
-                    std::vector<std::vector<std::optional<Address>>> const
-                        authorities = monad::recover_authorities(
+                    auto const [senders, authorities] =
+                        recover_senders_and_authorities(
                             transactions, fiber_pool->pool);
+
+                    auto const senders_and_authorities =
+                        combine_senders_and_authorities(senders, authorities);
+
+                    // Load parent and grandparent senders and authorities
+                    std::unique_ptr<
+                        ankerl::unordered_dense::segmented_set<Address>>
+                        parent_senders_and_authorities = nullptr;
+                    std::unique_ptr<
+                        ankerl::unordered_dense::segmented_set<Address>>
+                        grandparent_senders_and_authorities = nullptr;
+
+                    if (MONAD_LIKELY(block_number > 1)) {
+                        auto const parent_transactions =
+                            monad::get_transactions(
+                                db, block_number - 1, parent_id);
+                        MONAD_ASSERT_THROW(
+                            parent_transactions.has_value(),
+                            TRANSACTIONS_CONTEXT_ERR_MSG);
+                        auto const &[parent_senders, parent_authorities] =
+                            recover_senders_and_authorities(
+                                parent_transactions.assume_value(),
+                                fiber_pool->pool);
+                        parent_senders_and_authorities = std::make_unique<
+                            ankerl::unordered_dense::segmented_set<Address>>(
+                            combine_senders_and_authorities(
+                                parent_senders, parent_authorities));
+                    }
+                    if (MONAD_LIKELY(block_number > 2)) {
+                        auto const grandparent_transactions =
+                            monad::get_transactions(
+                                db, block_number - 2, grandparent_id);
+                        MONAD_ASSERT_THROW(
+                            grandparent_transactions.has_value(),
+                            TRANSACTIONS_CONTEXT_ERR_MSG);
+                        auto const
+                            &[grandparent_senders, grandparent_authorities] =
+                                recover_senders_and_authorities(
+                                    grandparent_transactions.assume_value(),
+                                    fiber_pool->pool);
+                        grandparent_senders_and_authorities = std::make_unique<
+                            ankerl::unordered_dense::segmented_set<Address>>(
+                            combine_senders_and_authorities(
+                                grandparent_senders, grandparent_authorities));
+                    }
+
+                    MonadChainContext chain_context{
+                        .grandparent_senders_and_authorities =
+                            grandparent_senders_and_authorities
+                                ? grandparent_senders_and_authorities.get()
+                                : nullptr,
+                        .parent_senders_and_authorities =
+                            parent_senders_and_authorities
+                                ? parent_senders_and_authorities.get()
+                                : nullptr,
+                        .senders_and_authorities = senders_and_authorities,
+                        .senders = senders,
+                        .authorities = authorities};
 
                     // Set db to parent block state
                     TrieRODb tdb{db};
@@ -1164,10 +1275,9 @@ struct monad_executor
                             SWITCH_EVM_TRAITS(
                                 eth_trace_block_or_transaction_impl,
                                 *chain,
+                                chain_context,
                                 block_header,
                                 transactions,
-                                senders,
-                                authorities,
                                 trace_transaction,
                                 transaction_index,
                                 block_state,
@@ -1184,10 +1294,9 @@ struct monad_executor
                             SWITCH_MONAD_TRAITS(
                                 eth_trace_block_or_transaction_impl,
                                 *chain,
+                                chain_context,
                                 block_header,
                                 transactions,
-                                senders,
-                                authorities,
                                 trace_transaction,
                                 transaction_index,
                                 block_state,
@@ -1336,7 +1445,9 @@ void monad_eth_trace_block_or_transaction_executor_submit(
     uint8_t const *rlp_header, size_t rlp_header_len, uint64_t block_number,
     uint8_t const *rlp_block_id, size_t rlp_block_id_len,
     uint8_t const *rlp_parent_block_id, size_t rlp_parent_block_id_len,
-    bool const trace_transaction, uint64_t const transaction_index,
+    uint8_t const *rlp_grandparent_block_id,
+    size_t rlp_grandparent_block_id_len, bool const trace_transaction,
+    uint64_t const transaction_index,
     void (*complete)(monad_executor_result *, void *user), void *user,
     enum monad_tracer_config tracer_config)
 {
@@ -1346,6 +1457,8 @@ void monad_eth_trace_block_or_transaction_executor_submit(
     byte_string_view block_id_view({rlp_block_id, rlp_block_id_len});
     byte_string_view parent_id_view(
         {rlp_parent_block_id, rlp_parent_block_id_len});
+    byte_string_view grandparent_id_view(
+        {rlp_grandparent_block_id, rlp_grandparent_block_id_len});
 
     auto const block_header_result = rlp::decode_block_header(rlp_header_view);
     MONAD_ASSERT(!block_header_result.has_error());
@@ -1362,12 +1475,24 @@ void monad_eth_trace_block_or_transaction_executor_submit(
     MONAD_ASSERT(parent_id_view.empty());
     auto const parent_id = parent_id_result.value();
 
+    auto const grandparent_id = [&]() {
+        if (grandparent_id_view.size() == 0) {
+            return bytes32_t{};
+        }
+        auto const grandparent_id_result =
+            rlp::decode_bytes32(grandparent_id_view);
+        MONAD_ASSERT(!grandparent_id_result.has_error());
+        MONAD_ASSERT(grandparent_id_view.empty());
+        return grandparent_id_result.value();
+    }();
+
     executor->submit_eth_trace_block_or_transaction_to_pool(
         chain_config,
         block_header,
         block_number,
         block_id,
         parent_id,
+        grandparent_id,
         trace_transaction,
         transaction_index,
         complete,
